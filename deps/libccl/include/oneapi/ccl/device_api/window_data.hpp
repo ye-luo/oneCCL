@@ -29,10 +29,11 @@ namespace v1 {
 struct window_data {
     void** ptrs;            /**< device array of peer base pointers, indexed by LSA (node) rank (size = lsa_size) */
     int nranks;             /**< number of entries in ptrs[] (equals lsa_size) */
-    size_t size;            /**< size of each peer's window region in bytes */
+    size_t size;            /**< size of local rank's window region in bytes */
     int lsa_rank;           /**< this rank's position in the LSA team (its node rank) */
     int world_rank;         /**< this rank's position in the world communicator */
     int lsa_size;           /**< number of ranks in the LSA team */
+    size_t* sizes;          /**< device array of peer buffer sizes, indexed by LSA (node) rank (size = lsa_size) */
 };
 
 } // namespace v1

@@ -59,11 +59,15 @@ namespace v1 {
  * @return       pointer to the peer's buffer at the given offset, or nullptr on error
  */
 inline void* get_peer_pointer(window_t win, size_t offset, int peer) {
-    if (!win || !win->ptrs || offset >= win->size) {
+    if (!win || !win->ptrs) {
         return nullptr;
     }
     int slot = win->lsa_rank + (peer - win->world_rank);
-    if (slot < 0 || slot >= win->lsa_size) {
+    if (slot < 0 || slot >= win->lsa_size || !win->ptrs[slot]) {
+        return nullptr;
+    }
+    size_t peer_size = (win->sizes) ? win->sizes[slot] : win->size;
+    if (offset >= peer_size) {
         return nullptr;
     }
     return static_cast<char*>(win->ptrs[slot]) + offset;
@@ -79,8 +83,11 @@ inline void* get_peer_pointer(window_t win, size_t offset, int peer) {
  * @return         pointer to the peer's buffer at the given offset, or nullptr on error
  */
 inline void* get_lsa_pointer(window_t win, size_t offset, int lsa_peer) {
-    if (!win || !win->ptrs || offset >= win->size || lsa_peer < 0 ||
-        lsa_peer >= win->lsa_size) {
+    if (!win || !win->ptrs || lsa_peer < 0 || lsa_peer >= win->lsa_size || !win->ptrs[lsa_peer]) {
+        return nullptr;
+    }
+    size_t peer_size = (win->sizes) ? win->sizes[lsa_peer] : win->size;
+    if (offset >= peer_size) {
         return nullptr;
     }
     return static_cast<char*>(win->ptrs[lsa_peer]) + offset;
@@ -94,8 +101,11 @@ inline void* get_lsa_pointer(window_t win, size_t offset, int lsa_peer) {
  * @return       pointer to the local buffer at the given offset, or nullptr on error
  */
 inline void* get_local_pointer(window_t win, size_t offset) {
-    if (!win || !win->ptrs || offset >= win->size || win->lsa_rank < 0 ||
-        win->lsa_rank >= win->lsa_size) {
+    if (!win || !win->ptrs || win->lsa_rank < 0 || win->lsa_rank >= win->lsa_size || !win->ptrs[win->lsa_rank]) {
+        return nullptr;
+    }
+    size_t local_size = (win->sizes) ? win->sizes[win->lsa_rank] : win->size;
+    if (offset >= local_size) {
         return nullptr;
     }
     return static_cast<char*>(win->ptrs[win->lsa_rank]) + offset;

@@ -924,7 +924,9 @@ onecclResult_t onecclCommWindowRegister(onecclComm_t comm, void *buff,
     INIT_CCL;
 
     ONECCL_CHECK_PTR(comm);
-    ONECCL_CHECK_PTR(buff);
+    if (buff == nullptr && size > 0) {
+        return onecclInvalidArgument;
+    }
     ONECCL_CHECK_PTR(window);
 
     if (comm->comm_window_register == nullptr) {

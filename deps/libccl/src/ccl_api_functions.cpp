@@ -225,6 +225,7 @@ struct window_record {
     /** Mirror of what was published to the device; every pointer in it is a device address. */
     window_data host_copy{};
     std::vector<void*> host_ptrs;          /**< peer base pointers, for the host resolves */
+    std::vector<size_t> host_sizes;        /**< peer buffer sizes, for the host resolves */
     ccl_window* internal_window = nullptr; /**< host-only: IPC handle lifetime */
 };
 
@@ -258,13 +259,14 @@ window_t window_register_internal(ccl_comm* ccl_comm_ptr,
     window_record record;
     window_data& host_copy = record.host_copy;
     host_copy.ptrs = nullptr;
+    host_copy.sizes = nullptr;
     host_copy.nranks = 0;
     host_copy.size = size;
     host_copy.world_rank = ccl_comm_ptr->rank();
     host_copy.lsa_size = static_cast<int>(node_comm->size());
     host_copy.lsa_rank = node_comm->rank();
 
-    if (win_flags == CCL_WIN_COLL_SYMMETRIC) {
+    if (win_flags == CCL_WIN_COLL_SYMMETRIC || win_flags == CCL_WIN_DEFAULT) {
         // The get_*_pointer world->LSA conversion assumes this node's world ranks
         // are consecutive (node rank i -> comm rank world_base + i). Checked before
         // registering anything, so an unsupported layout fails loudly here rather
@@ -287,22 +289,27 @@ window_t window_register_internal(ccl_comm* ccl_comm_ptr,
         record.internal_window = node_comm->window_register(buffer, size);
         if (record.internal_window) {
             record.host_ptrs = record.internal_window->get_ptrs(0);
+            record.host_sizes = record.internal_window->get_sizes();
             host_copy.nranks = static_cast<int>(record.host_ptrs.size());
         }
     }
     else {
-        LOG_WARN("Window registration is not support, CCL_WIN_COLL_SYMMETRIC ignored");
+        LOG_WARN("Window registration flag ", win_flags, " is not supported");
     }
 
-    // The pointer array kernels index, and the window struct itself.
+    // The pointer array and size array kernels index, and the window struct itself.
     if (host_copy.nranks > 0) {
         host_copy.ptrs = sycl::malloc_device<void*>(host_copy.nranks, dev, ctx);
+        host_copy.sizes = sycl::malloc_device<size_t>(host_copy.nranks, dev, ctx);
     }
     window_data* dev_win = sycl::malloc_device<window_data>(1, dev, ctx);
 
     sycl::queue q(ctx, dev);
     if (host_copy.ptrs) {
         q.memcpy(host_copy.ptrs, record.host_ptrs.data(), host_copy.nranks * sizeof(void*));
+    }
+    if (host_copy.sizes) {
+        q.memcpy(host_copy.sizes, record.host_sizes.data(), host_copy.nranks * sizeof(size_t));
     }
     q.memcpy(dev_win, &host_copy, sizeof(window_data));
     q.wait();
@@ -334,6 +341,9 @@ void window_deregister_internal(ccl_comm* ccl_comm_ptr, window_t& win) {
 
     if (record.host_copy.ptrs) {
         sycl::free(record.host_copy.ptrs, ctx);
+    }
+    if (record.host_copy.sizes) {
+        sycl::free(record.host_copy.sizes, ctx);
     }
     sycl::free(win, ctx);
 #else
@@ -396,12 +406,17 @@ void get_peer_device_pointer(window_t win, size_t offset, int peer, void** out_p
     const window_record* record = nullptr;
     auto lock = window_records.at("get_peer_device_pointer", win, &record);
     const std::vector<void*>& ptrs = record->host_ptrs;
+    const std::vector<size_t>& sizes = record->host_sizes;
     // Convert the world rank to an LSA slot, ptrs[] being LSA-rank indexed
     // (node ranks are contiguous in world order, enforced at registration).
     int slot = record->host_copy.lsa_rank + (peer - record->host_copy.world_rank);
-    if (offset >= record->host_copy.size || slot < 0 ||
-        slot >= record->host_copy.lsa_size || slot >= static_cast<int>(ptrs.size()) ||
-        !ptrs[slot]) {
+    if (slot < 0 || slot >= record->host_copy.lsa_size ||
+        slot >= static_cast<int>(ptrs.size()) || !ptrs[slot]) {
+        *out_ptr = nullptr;
+        return;
+    }
+    size_t peer_size = (slot < static_cast<int>(sizes.size())) ? sizes[slot] : record->host_copy.size;
+    if (offset >= peer_size) {
         *out_ptr = nullptr;
         return;
     }
@@ -410,6 +425,7 @@ void get_peer_device_pointer(window_t win, size_t offset, int peer, void** out_p
               " slot=", slot,
               " base=", ptrs[slot],
               " offset=", offset,
+              " size=", peer_size,
               " result=", *out_ptr);
 #else
     CCL_THROW("get_peer_device_pointer requires SYCL and Level Zero");
@@ -428,10 +444,15 @@ void get_lsa_device_pointer(window_t win, size_t offset, int lsa_peer, void** ou
     const window_record* record = nullptr;
     auto lock = window_records.at("get_lsa_device_pointer", win, &record);
     const std::vector<void*>& ptrs = record->host_ptrs;
+    const std::vector<size_t>& sizes = record->host_sizes;
     // ptrs[] is LSA-rank indexed, so lsa_peer indexes it directly.
-    if (offset >= record->host_copy.size || lsa_peer < 0 ||
-        lsa_peer >= record->host_copy.lsa_size ||
+    if (lsa_peer < 0 || lsa_peer >= record->host_copy.lsa_size ||
         lsa_peer >= static_cast<int>(ptrs.size()) || !ptrs[lsa_peer]) {
+        *out_ptr = nullptr;
+        return;
+    }
+    size_t peer_size = (lsa_peer < static_cast<int>(sizes.size())) ? sizes[lsa_peer] : record->host_copy.size;
+    if (offset >= peer_size) {
         *out_ptr = nullptr;
         return;
     }
@@ -439,6 +460,7 @@ void get_lsa_device_pointer(window_t win, size_t offset, int lsa_peer, void** ou
     LOG_DEBUG("get_lsa_device_pointer: lsa_peer=", lsa_peer,
               " base=", ptrs[lsa_peer],
               " offset=", offset,
+              " size=", peer_size,
               " result=", *out_ptr);
 #else
     CCL_THROW("get_lsa_device_pointer requires SYCL and Level Zero");
@@ -457,10 +479,15 @@ void get_local_device_pointer(window_t win, size_t offset, void** out_ptr) {
     const window_record* record = nullptr;
     auto lock = window_records.at("get_local_device_pointer", win, &record);
     const std::vector<void*>& ptrs = record->host_ptrs;
+    const std::vector<size_t>& sizes = record->host_sizes;
     int slot = record->host_copy.lsa_rank;
-    if (offset >= record->host_copy.size || slot < 0 ||
-        slot >= record->host_copy.lsa_size || slot >= static_cast<int>(ptrs.size()) ||
-        !ptrs[slot]) {
+    if (slot < 0 || slot >= record->host_copy.lsa_size ||
+        slot >= static_cast<int>(ptrs.size()) || !ptrs[slot]) {
+        *out_ptr = nullptr;
+        return;
+    }
+    size_t local_size = (slot < static_cast<int>(sizes.size())) ? sizes[slot] : record->host_copy.size;
+    if (offset >= local_size) {
         *out_ptr = nullptr;
         return;
     }
@@ -468,6 +495,7 @@ void get_local_device_pointer(window_t win, size_t offset, void** out_ptr) {
     LOG_DEBUG("get_local_device_pointer:"
               " base=", ptrs[slot],
               " offset=", offset,
+              " size=", local_size,
               " result=", *out_ptr);
 #else
     CCL_THROW("get_local_device_pointer requires SYCL and Level Zero");
@@ -482,7 +510,8 @@ void get_local_device_pointer(window_t win, size_t offset, void** out_ptr) {
 // Forward declaration (defined in simple_ipc.cpp at global scope)
 std::vector<std::vector<void*>> do_simple_ipc_exchange(ccl_comm* comm,
                                                        const std::vector<void*>& ptrs,
-                                                       const std::vector<size_t>& sizes);
+                                                       const std::vector<size_t>& sizes,
+                                                       std::vector<std::vector<size_t>>* out_sizes = nullptr);
 
 namespace ccl {
 namespace v1 {

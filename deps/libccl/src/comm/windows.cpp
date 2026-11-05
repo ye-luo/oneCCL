@@ -23,42 +23,45 @@
 
 std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
                                                         const std::vector<void *> &ptrs,
-                                                        const std::vector<size_t> &sizes);
+                                                        const std::vector<size_t> &sizes,
+                                                        std::vector<std::vector<size_t>> *out_sizes = nullptr);
 
 int ccl_window::register_buf(void *ptr, size_t size) {
 #if defined(CCL_ENABLE_SYCL) && defined(CCL_ENABLE_ZE)
     int comm_size = comm->size();
     int comm_rank = comm->rank();
 
-    ze_context_handle_t context{};
-    ze_device_handle_t device{};
-    ze_memory_allocation_properties_t mem_alloc_props{};
-    if (!ccl::ze::get_buffer_context_and_device(ptr, &context, &device, &mem_alloc_props)) {
-        LOG_WARN("unable to get context from ptr\n");
-        return 0;
+    if (ptr != nullptr && size > 0) {
+        ze_context_handle_t context{};
+        ze_device_handle_t device{};
+        ze_memory_allocation_properties_t mem_alloc_props{};
+        if (!ccl::ze::get_buffer_context_and_device(ptr, &context, &device, &mem_alloc_props)) {
+            LOG_WARN("unable to get context from ptr\n");
+            return 0;
+        }
+        void *base_ptr;
+        size_t total_size;
+        ZE_CALL(zeMemGetAddressRange, (context, ptr, &base_ptr, &total_size));
+        if ((size_t)((char *)ptr + size) > (size_t)((char *)base_ptr + total_size)) {
+            LOG_WARN("Invalid pointer registered. ");
+            return 0;
+        }
     }
-    void *base_ptr;
-    size_t total_size, offset;
-    ZE_CALL(zeMemGetAddressRange, (context, ptr, &base_ptr, &total_size));
-    if ((size_t)((char *)ptr + size) > (size_t)((char *)base_ptr + total_size)) {
-        LOG_WARN("Invalid pointer registered. ");
-        return 0;
-    }
-    offset = (char *)ptr - (char *)base_ptr;
 
     std::vector<void *> in_buffers(1);
     std::vector<size_t> in_buffers_sizes(1);
     in_buffers[0] = ptr;
     in_buffers_sizes[0] = size;
-    LOG_DEBUG("calling do_simple_ipc_exchange on:", std::hex, base_ptr);
+    LOG_DEBUG("calling do_simple_ipc_exchange on:", std::hex, ptr);
+    std::vector<std::vector<size_t>> ipc_sizes;
     std::vector<std::vector<void *>> ipc_ptrs =
-        do_simple_ipc_exchange(comm, in_buffers, in_buffers_sizes);
+        do_simple_ipc_exchange(comm, in_buffers, in_buffers_sizes, &ipc_sizes);
 
     registered_ptrs.resize(comm_size);
     for (int r = 0; r < comm_size; r++) {
         registered_ptrs[r].ptr = r == comm_rank ? ptr : ipc_ptrs[r][0];
-        registered_ptrs[r].size = size;
-        LOG_DEBUG("register ipc ptr: rank: ", r, " ptr: ", std::hex, registered_ptrs[r].ptr);
+        registered_ptrs[r].size = (!ipc_sizes.empty() && !ipc_sizes[r].empty()) ? ipc_sizes[r][0] : size;
+        LOG_DEBUG("register ipc ptr: rank: ", r, " ptr: ", std::hex, registered_ptrs[r].ptr, " size: ", registered_ptrs[r].size);
     }
     return 1;
 #else
@@ -74,10 +77,15 @@ int ccl_window::deregister_buf() {
     ze_context_handle_t context{};
     ze_device_handle_t device{};
     ze_memory_allocation_properties_t mem_alloc_props{};
-    if (!ccl::ze::get_buffer_context_and_device(
-            registered_ptrs[comm_rank].ptr, &context, &device, &mem_alloc_props)) {
-        LOG_WARN("unable to get context from ptr\n");
-        return 0;
+    if (registered_ptrs[comm_rank].ptr) {
+        ccl::ze::get_buffer_context_and_device(
+            registered_ptrs[comm_rank].ptr, &context, &device, &mem_alloc_props);
+    } else {
+        const auto& ze_data = ccl::global_data::get().ze_data;
+        if (ze_data && !ze_data->contexts.empty() && !ze_data->devices.empty()) {
+            context = ze_data->contexts[0];
+            device = ze_data->devices[0].device;
+        }
     }
 
     // This function is invoked from noexcept contexts (move-assignment and
@@ -86,9 +94,11 @@ int ccl_window::deregister_buf() {
     // value is a status code that all callers already ignore.
     try {
         for (int r = 0; r < comm_size; r++) {
-            if (r == comm->rank())
+            if (r == comm->rank() || registered_ptrs[r].ptr == nullptr)
                 continue;
-            ZE_CALL(zeMemCloseIpcHandle, (context, registered_ptrs[r].ptr));
+            if (context) {
+                ZE_CALL(zeMemCloseIpcHandle, (context, registered_ptrs[r].ptr));
+            }
         }
     }
     catch (const ccl::exception& e) {
@@ -121,7 +131,7 @@ bool ccl_window::is_registered(const void *ptr, size_t size, size_t &offset) {
 std::vector<void *> ccl_window::get_ptrs(size_t offset) {
     std::vector<void *> ptrs(comm->size());
     for (int r = 0; r < comm->size(); r++) {
-        ptrs[r] = static_cast<char *>(registered_ptrs[r].ptr) + offset;
+        ptrs[r] = registered_ptrs[r].ptr ? (static_cast<char *>(registered_ptrs[r].ptr) + offset) : nullptr;
         LOG_DEBUG("get ptr: rank: ",
                   r,
                   " ptr: ",
@@ -131,4 +141,19 @@ std::vector<void *> ccl_window::get_ptrs(size_t offset) {
                   offset);
     }
     return ptrs;
+}
+
+std::vector<size_t> ccl_window::get_sizes() const {
+    std::vector<size_t> sizes(comm->size());
+    for (int r = 0; r < comm->size(); r++) {
+        sizes[r] = registered_ptrs[r].size;
+    }
+    return sizes;
+}
+
+size_t ccl_window::get_size(int rank) const {
+    if (rank >= 0 && rank < static_cast<int>(registered_ptrs.size())) {
+        return registered_ptrs[rank].size;
+    }
+    return 0;
 }

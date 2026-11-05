@@ -37,7 +37,8 @@ struct payload_t {
 // no caching
 std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
                                                         const std::vector<void *> &ptrs,
-                                                        const std::vector<size_t> &sizes) {
+                                                        const std::vector<size_t> &sizes,
+                                                        std::vector<std::vector<size_t>> *out_sizes = nullptr) {
     int comm_rank = comm->rank();
     int comm_size = comm->size();
     int buf_count = ptrs.size();
@@ -45,16 +46,22 @@ std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
     std::vector<payload_t> all_payloads(comm_size * buf_count);
     std::vector<payload_t> local_payloads(buf_count);
     std::vector<std::vector<void *>> handles(comm_size);
+    if (out_sizes) {
+        out_sizes->resize(comm_size);
+    }
 
     for (int i = 0; i < buf_count; i++) {
         auto ptr = ptrs[i];
+        size_t buf_size = (i < static_cast<int>(sizes.size())) ? sizes[i] : 0;
+        payload_t payload{};
+        if (ptr == NULL || buf_size == 0) {
+            payload.size = buf_size;
+            local_payloads[i] = payload;
+            continue;
+        }
+
         void *base_ptr;
         size_t total_size;
-        if (ptr == NULL)
-            continue;
-        payload_t payload;
-        //int mem_handle = ccl::utils::invalid_mem_handle;
-
         ze_context_handle_t context{};
         ze_device_handle_t device{};
         ze_memory_allocation_properties_t mem_alloc_props{};
@@ -78,7 +85,7 @@ std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
             ZE_CALL(zeMemGetIpcHandle, (context, base_ptr, &ipc_handle));
         }
         payload.ipc_handle = ipc_handle;
-        payload.size = sizes[i];
+        payload.size = buf_size;
         payload.mem_offset = (char *)ptr - (char *)base_ptr;
         payload.context = context;
         payload.device = device;
@@ -93,21 +100,54 @@ std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
         CCL_THROW("allgather exchange is failed");
     }
 
+    ze_context_handle_t fallback_ctx{};
+    ze_device_handle_t fallback_dev{};
+    bool fallback_initialized = false;
+
     for (int r = 0; r < comm_size; r++) {
+        handles[r].resize(buf_count);
+        if (out_sizes) {
+            (*out_sizes)[r].resize(buf_count);
+        }
         if (r == comm_rank) {
             handles[r] = ptrs;
+            if (out_sizes) {
+                for (int buf_idx = 0; buf_idx < buf_count; buf_idx++) {
+                    (*out_sizes)[r][buf_idx] = (buf_idx < static_cast<int>(sizes.size())) ? sizes[buf_idx] : 0;
+                }
+            }
         }
         else {
-            handles[r].resize(buf_count);
             for (int buf_idx = 0; buf_idx < buf_count; buf_idx++) {
                 int payload_idx = buf_count * r + buf_idx;
-                if (all_payloads[payload_idx].size != local_payloads[buf_idx].size) {
-                    CCL_THROW("not same size\n");
+                size_t peer_size = all_payloads[payload_idx].size;
+                if (out_sizes) {
+                    (*out_sizes)[r][buf_idx] = peer_size;
                 }
-                void *ptr;
+                if (peer_size == 0) {
+                    handles[r][buf_idx] = nullptr;
+                    continue;
+                }
+
+                ze_context_handle_t ctx = local_payloads[buf_idx].context;
+                ze_device_handle_t dev = local_payloads[buf_idx].device;
+                if (!ctx || !dev) {
+                    if (!fallback_initialized) {
+                        const auto& ze_data = ccl::global_data::get().ze_data;
+                        if (ze_data && !ze_data->contexts.empty() && !ze_data->devices.empty()) {
+                            fallback_ctx = ze_data->contexts[0];
+                            fallback_dev = ze_data->devices[0].device;
+                            fallback_initialized = true;
+                        }
+                    }
+                    ctx = fallback_ctx;
+                    dev = fallback_dev;
+                }
+
+                void *ptr = nullptr;
                 ZE_CALL(zeMemOpenIpcHandle,
-                        (local_payloads[buf_idx].context,
-                         local_payloads[buf_idx].device,
+                        (ctx,
+                         dev,
                          all_payloads[payload_idx].ipc_handle,
                          0 /* cache allocation */,
                          &ptr));

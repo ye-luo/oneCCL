@@ -45,6 +45,8 @@ public:
     bool is_registered(const void *ptr, size_t size, size_t &offset);
 
     std::vector<void *> get_ptrs(size_t offset);
+    std::vector<size_t> get_sizes() const;
+    size_t get_size(int rank) const;
 
     int register_buf(void *ptr, size_t size);
 

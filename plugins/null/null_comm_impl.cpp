@@ -261,12 +261,12 @@ onecclResult_t oneccl_comm_deregister_impl(onecclComm_t /*comm*/,
 }
 
 onecclResult_t oneccl_comm_window_register_impl(onecclComm_t /*comm*/,
-                                                void *buff, size_t /*size*/,
+                                                void *buff, size_t size,
                                                 onecclWindow_t *window,
                                                 onecclWindowFlags_t /*flags*/) {
     PROCESS_HOOKS(ONECCL_BEFORE_COMM_WINDOW_REGISTER);
 
-    if (buff == nullptr || window == nullptr) {
+    if (window == nullptr || (buff == nullptr && size > 0)) {
         return onecclInvalidArgument;
     }
 
