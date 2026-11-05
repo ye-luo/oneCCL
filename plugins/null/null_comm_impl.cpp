@@ -266,7 +266,7 @@ onecclResult_t oneccl_comm_window_register_impl(onecclComm_t /*comm*/,
                                                 onecclWindowFlags_t /*flags*/) {
     PROCESS_HOOKS(ONECCL_BEFORE_COMM_WINDOW_REGISTER);
 
-    if (window == nullptr || (buff == nullptr && size > 0)) {
+    if (buff == nullptr || size == 0 || window == nullptr) {
         return onecclInvalidArgument;
     }
 

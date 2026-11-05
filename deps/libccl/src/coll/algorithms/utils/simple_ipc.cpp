@@ -100,10 +100,6 @@ std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
         CCL_THROW("allgather exchange is failed");
     }
 
-    ze_context_handle_t fallback_ctx{};
-    ze_device_handle_t fallback_dev{};
-    bool fallback_initialized = false;
-
     for (int r = 0; r < comm_size; r++) {
         handles[r].resize(buf_count);
         if (out_sizes) {
@@ -122,7 +118,11 @@ std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
                 int payload_idx = buf_count * r + buf_idx;
                 size_t peer_size = all_payloads[payload_idx].size;
                 if (out_sizes) {
+                    // caller supports per-rank sizes (e.g. window registration)
                     (*out_sizes)[r][buf_idx] = peer_size;
+                }
+                else if (peer_size != local_payloads[buf_idx].size) {
+                    CCL_THROW("not same size\n");
                 }
                 if (peer_size == 0) {
                     handles[r][buf_idx] = nullptr;
@@ -131,18 +131,7 @@ std::vector<std::vector<void *>> do_simple_ipc_exchange(ccl_comm *comm,
 
                 ze_context_handle_t ctx = local_payloads[buf_idx].context;
                 ze_device_handle_t dev = local_payloads[buf_idx].device;
-                if (!ctx || !dev) {
-                    if (!fallback_initialized) {
-                        const auto& ze_data = ccl::global_data::get().ze_data;
-                        if (ze_data && !ze_data->contexts.empty() && !ze_data->devices.empty()) {
-                            fallback_ctx = ze_data->contexts[0];
-                            fallback_dev = ze_data->devices[0].device;
-                            fallback_initialized = true;
-                        }
-                    }
-                    ctx = fallback_ctx;
-                    dev = fallback_dev;
-                }
+                CCL_THROW_IF_NOT(ctx && dev, "no local L0 context/device to open the IPC handle");
 
                 void *ptr = nullptr;
                 ZE_CALL(zeMemOpenIpcHandle,

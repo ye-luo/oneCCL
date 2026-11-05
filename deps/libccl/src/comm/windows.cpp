@@ -31,7 +31,11 @@ int ccl_window::register_buf(void *ptr, size_t size) {
     int comm_size = comm->size();
     int comm_rank = comm->rank();
 
-    if (ptr != nullptr && size > 0) {
+    if (ptr == nullptr || size == 0) {
+        LOG_WARN("invalid pointer ", ptr, " / size ", size, " for window registration");
+        return 0;
+    }
+    {
         ze_context_handle_t context{};
         ze_device_handle_t device{};
         ze_memory_allocation_properties_t mem_alloc_props{};
@@ -77,15 +81,10 @@ int ccl_window::deregister_buf() {
     ze_context_handle_t context{};
     ze_device_handle_t device{};
     ze_memory_allocation_properties_t mem_alloc_props{};
-    if (registered_ptrs[comm_rank].ptr) {
-        ccl::ze::get_buffer_context_and_device(
-            registered_ptrs[comm_rank].ptr, &context, &device, &mem_alloc_props);
-    } else {
-        const auto& ze_data = ccl::global_data::get().ze_data;
-        if (ze_data && !ze_data->contexts.empty() && !ze_data->devices.empty()) {
-            context = ze_data->contexts[0];
-            device = ze_data->devices[0].device;
-        }
+    if (!ccl::ze::get_buffer_context_and_device(
+            registered_ptrs[comm_rank].ptr, &context, &device, &mem_alloc_props)) {
+        LOG_WARN("unable to get context from ptr\n");
+        return 0;
     }
 
     // This function is invoked from noexcept contexts (move-assignment and

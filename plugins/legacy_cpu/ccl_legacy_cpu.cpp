@@ -420,7 +420,7 @@ onecclResult_t oneccl_comm_window_register_impl(onecclComm_t comm, void *buff,
                                                 size_t size,
                                                 onecclWindow_t *window,
                                                 onecclWindowFlags_t flags) {
-    if (comm == nullptr || window == nullptr || (buff == nullptr && size > 0)) {
+    if (comm == nullptr || window == nullptr || buff == nullptr || size == 0) {
         return onecclInvalidArgument;
     }
 
