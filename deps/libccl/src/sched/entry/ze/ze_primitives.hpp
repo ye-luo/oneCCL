@@ -33,8 +33,8 @@ namespace ze {
 enum class device_id : uint32_t {
     unknown = 0x0,
     id1 = 0x200,
-    id2 = 0xbd0,
-    id3 = 0xb60,
+    id2 = 0xbd0, /* MAX 1550 */
+    id3 = 0xb080, /* ARC B390 */
     id4 = 0x56a0, /* ARC A-series */
     id5 = 0xe200, /* ARC B-series */
     id6 = 0xe210, /* ARC B-series DT6 */

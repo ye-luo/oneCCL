@@ -744,7 +744,8 @@ std::string to_string(const zes_fabric_port_state_t& state) {
 }
 
 bool is_arc_card(device_family family) {
-    return family == ccl::device_family::family4 || family == ccl::device_family::family5 ||
+    return family == ccl::device_family::family2 || family == ccl::device_family::family3 ||
+           family == ccl::device_family::family4 || family == ccl::device_family::family5 ||
            family == ccl::device_family::family6 || family == ccl::device_family::family7 ||
            family == ccl::device_family::family8 || ccl::global_data::env().sycl_force_pcie;
 }
